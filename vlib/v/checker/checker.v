@@ -157,6 +157,10 @@ mut:
 
 	shown_xvweb_deprecation bool // prevents showing the deprecation more than once per compilation
 	shown_vweb_deprecation  bool // prevents showing the deprecation more than once per compilation
+	is_decl_only bool
+	checked_files map[string]bool
+	past_1_files  map[string]bool
+	past_2_files  map[string]bool
 }
 
 pub fn new_checker(table &ast.Table, pref_ &pref.Preferences) &Checker {
@@ -222,6 +226,8 @@ fn (mut c Checker) reset_checker_state_at_start_of_new_file() {
 }
 
 pub fn (mut c Checker) check(mut ast_file ast.File) {
+	phase := if c.is_decl_only { 'D' } else { 'F' }
+    println('DEBUG: [${phase}] checking ${ast_file.path}')
 	$if trace_check ? {
 		eprintln('> ${@FILE}:${@LINE} | ast_file.path: ${ast_file.path}')
 	}
@@ -293,15 +299,24 @@ pub fn (mut c Checker) check(mut ast_file ast.File) {
 		}
 	}
 
-	c.stmt_level = 0
-	for mut stmt in ast_file.stmts {
-		if stmt !in [ast.ConstDecl, ast.GlobalDecl, ast.ExprStmt] {
-			c.expr_level = 0
+	if c.is_decl_only {
+		if ast_file.path in c.past_1_files { return }
+		c.past_1_files[ast_file.path] = true
+		
+		for mut imp in ast_file.imports { c.import_stmt(imp) }
+		for mut stmt in ast_file.stmts {
 			c.stmt(mut stmt)
 		}
-		if c.should_abort {
-			return
-		}
+		return
+	}
+
+	// --- Pass 2 (本体精査) ---
+	c.stmt_level = 0
+if ast_file.path in c.past_2_files { return }
+	c.past_2_files[ast_file.path] = true
+
+	for mut stmt in ast_file.stmts {
+		c.stmt(mut stmt)
 	}
 
 	c.check_scope_vars(c.file.scope)
@@ -384,6 +399,7 @@ pub fn (mut c Checker) change_current_file(file &ast.File) {
 pub fn (mut c Checker) check_files(ast_files []&ast.File) {
 	// println('check_files')
 	// c.files = ast_files
+	c.is_decl_only = true
 	mut has_main_mod_file := false
 	mut has_no_main_mod_file := false
 	mut has_main_fn := false
@@ -396,8 +412,9 @@ pub fn (mut c Checker) check_files(ast_files []&ast.File) {
 			os.real_path(os.dir(c.pref.linfo.path))
 		}
 	}
+
+	c.is_decl_only = true 
 	unsafe {
-		mut files_from_main_module := []&ast.File{}
 		for i in 0 .. ast_files.len {
 			mut file := ast_files[i]
 			if c.pref.is_vls && c.pref.line_info == '' && file.path != c.pref.path {
@@ -409,6 +426,29 @@ pub fn (mut c Checker) check_files(ast_files []&ast.File) {
 				}
 			}
 			c.timers.start('checker_check ${file.path}')
+			c.check(mut file)
+		}
+	}
+
+	c.is_decl_only = false
+	c.checked_files.clear()
+	mut files_from_main_module := []&ast.File{}
+	unsafe {
+		for i in 0 .. ast_files.len {
+			mut file := ast_files[i]
+			if c.pref.is_vls && c.pref.line_info == '' && file.path != c.pref.path {
+				continue
+			}
+			if c.pref.is_vls && c.pref.line_info != '' && project_dir != '' {
+				if !os.real_path(file.path).starts_with(project_dir) {
+					continue
+				}
+			}
+			c.timers.start('checker_check ${file.path}')
+			if file.path in c.checked_files {
+				continue
+			}
+			c.checked_files[file.path] = true
 			c.check(mut file)
 			if file.mod.name == 'no_main' {
 				has_no_main_mod_file = true

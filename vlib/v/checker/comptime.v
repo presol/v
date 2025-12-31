@@ -441,6 +441,7 @@ fn (mut c Checker) comptime_for(mut node ast.ComptimeFor) {
 
 // comptime const eval
 fn (mut c Checker) eval_comptime_const_expr(expr ast.Expr, nlevel int) ?ast.ComptTimeConstValue {
+	eprintln('DEBUG: eval_const | is_decl_only: ${c.is_decl_only} | file: ${c.file.path}')
 	if nlevel > 100 {
 		// protect against a too deep comptime eval recursion
 		return none
