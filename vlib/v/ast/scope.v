@@ -18,6 +18,8 @@ pub mut:
 	children             []&Scope
 	start_pos            int
 	end_pos              int
+	last_found_name string
+    last_found_sc	voidptr
 }
 
 @[unsafe]
@@ -68,9 +70,21 @@ pub fn (s &Scope) find_ptr(name string) &ScopeObject {
 	if _unlikely_(s == unsafe { nil }) {
 		return 0
 	}
+	if name == s.last_found_name && s.last_found_sc != 0 {
+        sc_cached := unsafe { &Scope(s.last_found_sc) }
+        pobj := unsafe { &sc_cached.objects[name] or { nil } }
+        if pobj != unsafe { nil } {
+            return pobj
+        }
+    }
 	for sc := unsafe { s }; true; sc = sc.parent {
 		pobj := unsafe { &sc.objects[name] or { nil } }
 		if pobj != unsafe { nil } {
+			unsafe {
+				mut s_mut := &Scope(voidptr(s))
+				s_mut.last_found_name = name
+                s_mut.last_found_sc = voidptr(sc)
+			}
 			return pobj
 		}
 		if sc.dont_lookup_parent() {
