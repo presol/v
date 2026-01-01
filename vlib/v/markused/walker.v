@@ -63,8 +63,10 @@ mut:
 	uses_interp                bool // string interpolation
 	uses_guard                 bool
 	uses_orm                   bool
-	uses_str                   map[ast.Type]bool // has .str() calls, and for which types
-	uses_free                  map[ast.Type]bool // has .free() calls, and for which types
+	//uses_str                   map[ast.Type]bool // has .str() calls, and for which types
+	//uses_free                  map[ast.Type]bool // has .free() calls, and for which types
+	uses_str  []bool
+    uses_free []bool
 	uses_spawn                 bool
 	uses_dump                  bool
 	uses_memdup                bool // sumtype cast and &Struct{}
@@ -96,6 +98,10 @@ pub fn Walker.new(params Walker) &Walker {
 		...params
 	}
 	new_walker.features = params.table.used_features
+	
+	len_to_prealloc := params.table.type_symbols.len + 1000
+	new_walker.uses_str = []bool{len: len_to_prealloc, init: false}
+	new_walker.uses_free = []bool{len: len_to_prealloc, init: false}
 	return new_walker
 }
 
@@ -465,11 +471,14 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 				}
 			} else if !node.is_method && node.args.len == 1 && node.args[0].typ != ast.string_type
 				&& node.name in ['println', 'print', 'eprint', 'eprintln'] {
-				w.uses_str[node.args[0].typ] = true
+				idx := node.args[0].typ.idx()
+				if idx < w.uses_str.len { w.uses_str[idx] = true }
 			} else if node.is_method && node.name == 'str' {
-				w.uses_str[node.left_type] = true
+				idx := node.left_type.idx()
+				if idx < w.uses_str.len { w.uses_str[idx] = true }
 			} else if node.is_method && node.name == 'free' {
-				w.uses_free[node.left_type] = true
+				idx := node.left_type.idx()
+				if idx < w.uses_free.len { w.uses_free[idx] = true }
 			} else if node.is_method && node.name == 'clone' && !w.uses_arr_clone
 				&& node.left_type != 0 && w.table.final_sym(node.left_type).kind == .array {
 				w.uses_arr_clone = true
@@ -1199,14 +1208,38 @@ pub fn (mut w Walker) mark_by_sym_name(name string) {
 
 @[inline]
 pub fn (mut w Walker) mark_by_type(typ ast.Type) {
-	if typ == 0 || typ.has_flag(.generic) || typ in w.used_types {
-		return
-	}
-	w.mark_by_sym(w.table.sym(typ))
-	w.used_types[typ] = true
+    // 1. 基本チェック
+    if typ == 0 || typ.has_flag(.generic) {
+        return
+    }
+    
+    // 2. Map検索 `typ in w.used_types` を配列アクセスに置換
+    idx := typ.idx()
+    if idx < w.used_types.len {
+        if w.used_types[idx] { return }
+        w.used_types[idx] = true
+    } else {
+        // 万が一の境界外（基本は発生しない）
+        return 
+    }
+
+    w.mark_by_sym(w.table.sym(typ))
+    // w.used_types[typ] = true // 上で処理済みなので不要
 }
 
 pub fn (mut w Walker) mark_by_sym(isym ast.TypeSymbol) {
+	// 配列の範囲内かチェックし、既にマーク済みなら即リターン
+	if isym.idx < w.used_syms.len {
+		if w.used_syms[isym.idx] {
+			return
+		}
+		w.used_syms[isym.idx] = true
+	}
+	// まだマークされていない場合のみ、巨大なロジックを実行
+	w.mark_by_sym_base(isym)
+}
+
+pub fn (mut w Walker) mark_by_sym_base(isym ast.TypeSymbol) {
 	if isym.idx in w.used_syms {
 		return
 	}
@@ -1471,12 +1504,14 @@ fn (mut w Walker) mark_resource_dependencies() {
 		w.mark_by_type(typ)
 	}
 	if w.trace_enabled {
+		/*
 		ptypes := w.table.used_features.print_types.keys().map(w.table.type_to_str(it))
 		eprintln('>>>>>>>>>> PRINT TYPES ${ptypes}')
 		stypes := w.uses_str.keys().filter(it != 0).map(w.table.type_to_str(it))
 		eprintln('>>>>>>>>>> USES .str() CALLS ON TYPES ${stypes}')
 		ftypes := w.uses_free.keys().map(w.table.type_to_str(it))
 		eprintln('>>>>>>>>>> USES .free() CALLS ON TYPES ${ftypes}')
+		*/
 	}
 	if w.trace_enabled {
 		eprintln('>>>>>>>>>> ALL_FNS LOOP')

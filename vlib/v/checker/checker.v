@@ -157,6 +157,9 @@ mut:
 
 	shown_xvweb_deprecation bool // prevents showing the deprecation more than once per compilation
 	shown_vweb_deprecation  bool // prevents showing the deprecation more than once per compilation
+	tmp_types    []ast.Type
+	tmp_exprs    []ast.Expr
+	checked_types []ast.Type // index_expr などの再帰チェック用
 }
 
 pub fn new_checker(table &ast.Table, pref_ &pref.Preferences) &Checker {
@@ -4739,27 +4742,31 @@ fn (mut c Checker) check_known_struct_name(ident ast.Ident) ? {
 }
 
 fn (mut c Checker) concat_expr(mut node ast.ConcatExpr) ast.Type {
-	mut mr_types := []ast.Type{}
+	// 修正前: mut mr_types := []ast.Type{}
+	c.tmp_types.clear() 
 	for mut expr in node.vals {
 		mut typ := c.expr(mut expr)
 		if typ == ast.nil_type {
-			// nil and voidptr produces the same struct type name
 			typ = ast.voidptr_type
 		}
-		mr_types << typ
+		c.tmp_types << typ
 	}
+	
 	if node.vals.len == 1 {
-		typ := mr_types[0]
+		typ := c.tmp_types[0] // mr_types[0] の代わり
 		node.return_type = typ
 		return typ
 	} else {
-		for i := 0; i < mr_types.len; i++ {
-			if mr_types[i] == ast.void_type {
+		// mr_types を c.tmp_types に読み替えてループ
+		for i := 0; i < c.tmp_types.len; i++ {
+			if c.tmp_types[i] == ast.void_type {
 				c.error('type `void` cannot be used in multi-return', node.vals[i].pos())
 				return ast.void_type
 			}
 		}
-		typ := c.table.find_or_register_multi_return(mr_types)
+		// 最終的に登録が必要な場合は、ここだけはコピー（クローン）を渡す
+		// find_or_register_multi_return が内部で配列を保持するため。
+		typ := c.table.find_or_register_multi_return(c.tmp_types.clone()) 
 		ast.new_type(typ)
 		node.return_type = typ
 		return typ
@@ -5413,10 +5420,10 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 			c.warn('accessing a pointer map value requires an `or {}` block outside `unsafe`',
 				node.pos)
 		}
-		mut checked_types := []ast.Type{}
-		if c.is_contains_any_kind_of_pointer(elem_type, mut checked_types) {
-			c.warn('accessing map value that contain pointers requires an `or {}` block outside `unsafe`',
-				node.pos)
+		c.checked_types.clear() // キャパシティを維持したまま長さを0にする
+		if c.is_contains_any_kind_of_pointer(elem_type, mut c.checked_types) {
+		    c.warn('accessing map value that contain pointers requires an `or {}` block outside `unsafe`',
+    	    node.pos)
 		}
 	}
 

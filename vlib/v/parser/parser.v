@@ -1281,7 +1281,25 @@ fn (mut p Parser) semicolon_stmt() ast.SemicolonStmt {
 }
 
 fn (mut p Parser) expr_list(expect_value bool) []ast.Expr {
-	mut exprs := []ast.Expr{cap: 1}
+	// 1つ目の要素をパース
+	first_expr := if expect_value { p.expr(0) } else { p.expr_no_value(0) }
+	
+	// コメントでなく、かつ次にコンマがなければ、ここで即座に配列を作って返す
+	if first_expr !is ast.Comment && p.tok.kind != .comma {
+		return [first_expr] 
+	}
+
+	// 以下、複数要素がある場合（またはコメントの場合）のレアケース用ロジック
+	mut exprs := []ast.Expr{cap: 2} // 2つ目があることが確定しているので cap: 2
+	if first_expr !is ast.Comment {
+		exprs << first_expr
+	}
+	
+	// 既にコンマがある場合は進める
+	if p.tok.kind == .comma {
+		p.next()
+	}
+
 	for {
 		expr := if expect_value { p.expr(0) } else { p.expr_no_value(0) }
 		if expr !is ast.Comment {
