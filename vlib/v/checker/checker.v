@@ -2479,6 +2479,7 @@ fn (mut c Checker) check_loop_labels(label string, pos token.Pos) {
 }
 
 fn (mut c Checker) stmt(mut node ast.Stmt) {
+	unsafe { c.table.stmt_visits++ }
 	$if trace_checker ? {
 		ntype := typeof(*node).replace('v.ast.', '')
 		eprintln('checking: ${c.file.path:-30} | pos: ${node.pos.line_str():-39} | node: ${ntype} | ${node}')
@@ -3193,6 +3194,7 @@ fn (mut c Checker) unwrap_generic(typ ast.Type) ast.Type {
 }
 
 pub fn (mut c Checker) expr(mut node ast.Expr) ast.Type {
+	unsafe { c.table.expr_visits++ }
 	c.expr_level++
 	defer {
 		c.expr_level--
@@ -3230,6 +3232,7 @@ pub fn (mut c Checker) expr(mut node ast.Expr) ast.Type {
 		ast.ArrayDecompose {
 			typ := c.expr(mut node.expr)
 			type_sym := c.table.sym(typ)
+unsafe { c.table.sym_calls_by_fn['expr']++ } // 手動で場所を特定
 			if type_sym.kind == .array_fixed {
 				c.error('direct decomposition of fixed array is not allowed, convert the fixed array to normal array via ${node.expr}[..]',
 					node.expr.pos())

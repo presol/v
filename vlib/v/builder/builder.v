@@ -172,6 +172,22 @@ pub fn (mut b Builder) middle_stages() ! {
 	if b.pref.show_callgraph {
 		callgraph.show(mut b.table, b.pref, b.parsed_files)
 	}
+
+	if b.pref.is_stats {
+		t := b.table
+		border := '=============================='
+		println('\n${border}')
+		println('   STRUCTURAL REFORM STATS')
+		println('${border}')
+		println('AST Expr visits:  ${t.expr_visits:10}')
+		println('Table.sym calls:  ${t.sym_calls:10}')
+		println('Repeated calls:   ${t.total_repeats:10}  <-- !!') // 追加
+		if t.expr_visits > 0 {
+			eff := f64(t.sym_calls) / f64(t.expr_visits)
+			println('Efficiency:       ${eff:10.2f} sym/expr')
+		}
+		println('${border}')
+	}
 }
 
 pub fn (mut b Builder) front_and_middle_stages(v_files []string) ! {

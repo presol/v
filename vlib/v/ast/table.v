@@ -105,6 +105,15 @@ pub mut:
 	new_int_fmt_fix     bool              // vfmt will fix `int` to `i32`
 	export_names        map[string]string // @[export] names
 	filelist            []string          // all files list
+
+	sym_calls        i64
+	expr_visits      i64
+	stmt_visits      i64
+	sym_calls_by_fn map[string]i64
+	last_typ         Type   // 直前に呼ばれた型
+	repeat_count     i64    // 連続回数
+	total_repeats    i64    // 合計の無駄な呼び出し数
+	last_sym_ptr voidptr
 }
 
 pub struct ComptTimeCondResult {
@@ -767,11 +776,33 @@ pub fn (t &Table) sym_by_idx(idx int) &TypeSymbol {
 	return t.type_symbols[idx]
 }
 
-@[direct_array_access]
+@[inline] // 呼び出しのオーバーヘッドを消すために必須
 pub fn (t &Table) sym(typ Type) &TypeSymbol {
+	unsafe {
+		mut t2 := &Table(t)
+		t2.sym_calls++
+
+		// 1世代キャッシュ・チェック
+		if typ == t2.last_typ && t2.last_sym_ptr != 0 {
+			t2.total_repeats++
+			return &TypeSymbol(t2.last_sym_ptr) // キャストして返す
+		}
+	}
+	// キャッシュにない場合のみ、本体を呼び出す
+	return t.get_type_symbol(typ)
+}
+
+@[direct_array_access]
+pub fn (t &Table) get_type_symbol(typ Type) &TypeSymbol {
 	idx := typ.idx()
 	if idx > 0 && idx < t.type_symbols.len {
-		return t.type_symbols[idx]
+		res := t.type_symbols[idx]
+		unsafe {
+			mut t2 := &Table(t)
+			t2.last_typ = typ
+			t2.last_sym_ptr = voidptr(res) // voidptrとして保存
+		}
+		return res
 	}
 	// this should never happen
 	t.panic('table.sym: invalid type (typ=${typ} idx=${idx}). Compiler bug. This should never happen. Please report the bug using `v bug file.v`.

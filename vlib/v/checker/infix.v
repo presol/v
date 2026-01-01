@@ -10,6 +10,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	}
 	mut left_type := c.expr(mut node.left)
 	mut left_sym := c.table.sym(left_type)
+	unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 	node.left_type = left_type
 	c.expected_type = left_type
 
@@ -57,6 +58,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	}
 	// `arr << if n > 0 { 10 } else { 11 }` set the right c.expected_type
 	if node.op == .left_shift && c.table.sym(left_type).kind == .array {
+	unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 		if left_type.has_flag(.option) {
 			c.error('cannot push to Option array that was not unwrapped first', node.left.pos())
 		}
@@ -66,6 +68,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				if mut last_stmt is ast.ExprStmt {
 					expr_typ := c.expr(mut last_stmt.expr)
 					info := c.table.sym(left_type).array_info()
+					unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 					if expr_typ == info.elem_type {
 						c.expected_type = info.elem_type
 					}
@@ -75,6 +78,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			if node.right.exprs.len == 0 && node.right.elem_type == ast.void_type {
 				// handle arr << [] where [] is empty
 				info := c.table.sym(left_type).array_info()
+				unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 				node.right.elem_type = info.elem_type
 				c.expected_type = info.elem_type
 			}
@@ -121,6 +125,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		}
 	}
 	mut right_sym := c.table.sym(right_type)
+	unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 	right_final_sym := c.table.final_sym(c.unwrap_generic(right_type))
 	left_final_sym := c.table.final_sym(c.unwrap_generic(left_type))
 	left_pos := node.left.pos()
@@ -200,11 +205,13 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				if !is_left_type_signed && mut node.right is ast.IntegerLiteral {
 					if node.right.val.int() < 0 && left_type in ast.int_promoted_type_idxs {
 						lt := c.table.sym(left_type).name
+						unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 						c.error('`${lt}` cannot be compared with negative value', node.right.pos)
 					}
 				} else if !is_right_type_signed && mut node.left is ast.IntegerLiteral {
 					if node.left.val.int() < 0 && right_type in ast.int_promoted_type_idxs {
 						rt := c.table.sym(right_type).name
+						unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 						c.error('negative value cannot be compared with `${rt}`', node.left.pos)
 					}
 				} else if is_left_type_signed != is_right_type_signed
@@ -217,7 +224,9 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					if !c.pref.translated && ((is_left_type_signed && ls < rs)
 						|| (is_right_type_signed && rs < ls)) {
 						lt := c.table.sym(left_type).name
+	unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 						rt := c.table.sym(right_type).name
+	unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 						c.error('`${lt}` cannot be compared with `${rt}`', node.pos)
 					}
 				}
@@ -234,6 +243,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					|| (right_final_sym.language != .c && right_final_sym.kind == .placeholder))
 					&& !right_final_sym.is_heap() {
 					rt := c.table.sym(right_type).name
+					unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 					c.error('cannot compare with `nil` because `${rt}` is not a pointer',
 						node.pos)
 				}
@@ -249,6 +259,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					|| (left_final_sym.language != .c && left_final_sym.kind == .placeholder))
 					&& !left_final_sym.is_heap() {
 					lt := c.table.sym(left_type).name
+					unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 					c.error('cannot compare with `nil` because `${lt}` is not a pointer',
 						node.pos)
 				}
@@ -334,8 +345,10 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			// binary operators that expect matching types
 			unwrapped_left_type := c.unwrap_generic(left_type)
 			left_sym = c.table.sym(unwrapped_left_type)
+			unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 			unwrapped_right_type := c.unwrap_generic(right_type)
 			right_sym = c.table.sym(unwrapped_right_type)
+			unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 			if mut right_sym.info is ast.Alias && (right_sym.info.language != .c
 				&& c.mod == c.table.type_to_str(unwrapped_right_type).split('.')[0]
 				&& (right_final_sym.is_primitive() || right_final_sym.kind == .enum)) {
@@ -518,7 +531,9 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				}
 
 				left_sym = c.table.sym(unwrapped_left_type)
+				unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 				right_sym = c.table.sym(unwrapped_right_type)
+				unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 				if left_sym.info is ast.Alias && left_final_sym.is_primitive() {
 					if left_sym.has_method(op_str) {
 						if method := left_sym.find_method(op_str) {
@@ -533,6 +548,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					}
 				}
 				return_sym := c.table.sym(return_type)
+				unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 				if return_sym.info !is ast.Alias {
 					return_type = promoted_type
 				}
@@ -541,11 +557,13 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		.gt, .lt, .ge, .le {
 			unwrapped_left_type := c.unwrap_generic(left_type)
 			left_sym = c.table.sym(unwrapped_left_type)
+			unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 			if left_sym.kind == .alias && !left_sym.has_method_with_generic_parent(node.op.str()) {
 				left_sym = c.table.final_sym(unwrapped_left_type)
 			}
 			unwrapped_right_type := c.unwrap_generic(right_type)
 			right_sym = c.table.sym(unwrapped_right_type)
+			unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 			if right_sym.kind == .alias && !right_sym.has_method_with_generic_parent(node.op.str()) {
 				right_sym = c.table.final_sym(unwrapped_right_type)
 			}
@@ -583,6 +601,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				// the below check works as expected
 				left_gen_type := c.unwrap_generic(left_type)
 				gen_sym := c.table.sym(left_gen_type)
+				unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 				need_overload := gen_sym.kind in [.struct, .interface]
 				if need_overload && !gen_sym.has_method_with_generic_parent('<')
 					&& node.op in [.ge, .le] {
@@ -637,6 +656,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		.left_shift {
 			if left_final_sym.kind == .array
 				|| c.table.sym(c.unwrap_generic(left_type)).kind == .array {
+					unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 				return c.check_append(mut node, left_type, right_type, right_final_sym)
 			} else {
 				node.promoted_type = c.check_shift(mut node, left_type, right_type)
@@ -717,6 +737,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			}
 			if typ != ast.no_type {
 				typ_sym := c.table.sym(typ)
+				unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 				op := node.op.str()
 				if left_type.has_flag(.option) && !c.inside_sql {
 					c.error('${node.left} is an Optional, it needs to be unwrapped first',
@@ -728,6 +749,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				if mut left_sym.info is ast.Aggregate {
 					parent_left_type := left_sym.info.sum_type
 					left_sym = c.table.sym(parent_left_type)
+					unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 				}
 				if c.inside_sql {
 					if typ != ast.none_type_idx {
@@ -863,10 +885,12 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		if left_type.has_flag(.generic) {
 			left_type = c.unwrap_generic(left_type)
 			left_sym = c.table.sym(left_type)
+			unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 		}
 		if right_type.has_flag(.generic) {
 			right_type = c.unwrap_generic(right_type)
 			right_sym = c.table.sym(right_type)
+			unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 		}
 		types_match := c.symmetric_check(left_type, right_type)
 			&& c.symmetric_check(right_type, left_type)
@@ -901,12 +925,16 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				return ast.bool_type
 			}
 			error_left_sym := if node.left.is_auto_deref_var() {
-				c.table.sym(deref_left_type)
+				res:=c.table.sym(deref_left_type)
+				unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
+				res
 			} else {
 				left_sym
 			}
 			error_right_sym := if node.right.is_auto_deref_var() {
-				c.table.sym(deref_right_type)
+				res:=c.table.sym(deref_right_type)
+				unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
+				res
 			} else {
 				right_sym
 			}
@@ -1027,6 +1055,7 @@ fn (mut c Checker) autocast_in_if_conds(mut right ast.Expr, from_expr ast.Expr, 
 		ast.CallExpr {
 			if right.left.str() == from_expr.str()
 				&& c.table.sym(to_type).has_method_with_generic_parent(right.name) {
+					unsafe { c.table.sym_calls_by_fn['check_infix_expr']++ } // 手動で場所を特定
 				right.left = ast.ParExpr{
 					expr: ast.AsCast{
 						typ:       to_type

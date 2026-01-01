@@ -840,6 +840,7 @@ fn (mut c Checker) call_expr(mut node ast.CallExpr) ast.Type {
 			node.nr_ret_values = 0
 		} else {
 			ret_sym := c.table.sym(node.return_type)
+			unsafe { c.table.sym_calls_by_fn['check_call_expr']++ } // 手動で場所を特定
 			if ret_sym.info is ast.MultiReturn {
 				node.nr_ret_values = ret_sym.info.types.len
 			} else {
