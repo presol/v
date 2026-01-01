@@ -105,6 +105,10 @@ pub mut:
 	new_int_fmt_fix     bool              // vfmt will fix `int` to `i32`
 	export_names        map[string]string // @[export] names
 	filelist            []string          // all files list
+
+	total_calls u64
+	cache_hits  u64
+	last_idx    int = -1
 }
 
 pub struct ComptTimeCondResult {
@@ -770,6 +774,16 @@ pub fn (t &Table) sym_by_idx(idx int) &TypeSymbol {
 @[direct_array_access]
 pub fn (t &Table) sym(typ Type) &TypeSymbol {
 	idx := typ.idx()
+
+	unsafe {
+        mut mt := &Table(t)
+        mt.total_calls++
+        if idx == mt.last_idx {
+            mt.cache_hits++
+        }
+        mt.last_idx = idx
+    }
+
 	if idx > 0 && idx < t.type_symbols.len {
 		return t.type_symbols[idx]
 	}

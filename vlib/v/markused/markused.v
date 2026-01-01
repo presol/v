@@ -14,6 +14,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 		util.timing_measure('MARKUSED')
 	}
 
+eprintln('DEBUG: mark_used started')
 	trace_skip_unused := pref_.compile_values['trace_skip_unused'] == 'true'
 	trace_skip_unused_all_fns := pref_.compile_values['trace_skip_unused_all_fns'] == 'true'
 	trace_skip_unused_fn_names := pref_.compile_values['trace_skip_unused_fn_names'] == 'true'
@@ -332,6 +333,17 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 			}
 			println('> k: ${k}')
 		}
+	}
+
+	unsafe {
+//		if table.total_calls > 0 {
+			println('--------------------------------------------------')
+			println('Table.sym() Cache Statistics:')
+			println('Total sym() calls: ${table.total_calls}')
+			println('Cache hits:        ${table.cache_hits}')
+			println('Hit rate:          ${f64(table.cache_hits) / table.total_calls * 100:.2f}%')
+			println('--------------------------------------------------')
+//		}
 	}
 }
 
