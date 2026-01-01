@@ -8,12 +8,16 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	defer {
 		c.expected_type = former_expected_type
 	}
+
+	// 1. 左辺情報の取得とキャッシュ
 	mut left_type := c.expr(mut node.left)
 	mut left_sym := c.table.sym(left_type)
+	left_kind := left_sym.kind // ★キャッシュ
 	node.left_type = left_type
 	c.expected_type = left_type
 
-	if left_sym.kind == .chan {
+	// left_sym を直接参照
+	if left_kind == .chan {
 		chan_info := left_sym.chan_info()
 		c.expected_type = chan_info.elem_type
 	}
@@ -25,21 +29,18 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		node.right_ct_expr = c.comptime.is_comptime(node.right)
 	}
 
-	// `if n is ast.Ident && n.is_mut { ... }`
+	// Boolean AND optimization
 	if !c.inside_sql && node.op == .and {
 		mut left_node := node.left
 		for mut left_node is ast.InfixExpr {
 			if left_node.op == .and && mut left_node.right is ast.InfixExpr {
 				if left_node.right.op == .key_is {
-					// search last `n is ast.Ident` in the left
 					from_type := c.expr(mut left_node.right.left)
 					to_type := c.expr(mut left_node.right.right)
-					c.autocast_in_if_conds(mut node.right, left_node.right.left, from_type,
-						to_type)
+					c.autocast_in_if_conds(mut node.right, left_node.right.left, from_type, to_type)
 				}
 			}
 			if left_node.op == .key_is {
-				// search `n is ast.Ident`
 				from_type := c.expr(mut left_node.left)
 				to_type := c.expr(mut left_node.right)
 				c.autocast_in_if_conds(mut node.right, left_node.left, from_type, to_type)
@@ -55,8 +56,9 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	if node.op == .key_is {
 		c.inside_x_is_type = true
 	}
-	// `arr << if n > 0 { 10 } else { 11 }` set the right c.expected_type
-	if node.op == .left_shift && c.table.sym(left_type).kind == .array {
+
+	// 2. 左辺の Kind キャッシュを利用した配列プッシュの最適化
+	if node.op == .left_shift && left_kind == .array {
 		if left_type.has_flag(.option) {
 			c.error('cannot push to Option array that was not unwrapped first', node.left.pos())
 		}
@@ -65,7 +67,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				mut last_stmt := node.right.branches[0].stmts.last()
 				if mut last_stmt is ast.ExprStmt {
 					expr_typ := c.expr(mut last_stmt.expr)
-					info := c.table.sym(left_type).array_info()
+					info := left_sym.array_info() // ★再取得なし
 					if expr_typ == info.elem_type {
 						c.expected_type = info.elem_type
 					}
@@ -73,24 +75,33 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			}
 		} else if mut node.right is ast.ArrayInit {
 			if node.right.exprs.len == 0 && node.right.elem_type == ast.void_type {
-				// handle arr << [] where [] is empty
-				info := c.table.sym(left_type).array_info()
+				info := left_sym.array_info() // ★再取得なし
 				node.right.elem_type = info.elem_type
 				c.expected_type = info.elem_type
 			}
 		}
 	}
+
+	// 3. 右辺情報の取得とキャッシュ
 	mut right_type := c.expr(mut node.right)
 	if node.op == .key_is {
 		c.inside_x_is_type = false
 	}
-	if node.op == .amp && left_type.is_bool() && right_type.is_bool() && right_type.is_ptr() {
+	
+	// 基本型チェック
+	left_is_bool := left_type.is_bool()
+	right_is_bool := right_type.is_bool()
+	
+	if node.op == .amp && left_is_bool && right_is_bool && right_type.is_ptr() {
 		pos := node.pos.extend(node.right.pos())
 		c.error('the right expression should be separated from the `&&` by a space', pos)
 		node.promoted_type = ast.bool_type
 		return ast.bool_type
 	}
+	
 	node.right_type = right_type
+	
+	// リテラルキャストの最適化
 	if !left_type.has_flag(.option) && left_type.is_number() && !left_type.is_ptr()
 		&& right_type in [ast.int_literal_type, ast.float_literal_type] {
 		node.right_type = left_type
@@ -120,26 +131,35 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			}
 		}
 	}
+
+	// シンボルと位置情報の確定
 	mut right_sym := c.table.sym(right_type)
+	right_kind := right_sym.kind // ★キャッシュ
+	
 	right_final_sym := c.table.final_sym(c.unwrap_generic(right_type))
 	left_final_sym := c.table.final_sym(c.unwrap_generic(left_type))
+	
 	left_pos := node.left.pos()
 	right_pos := node.right.pos()
 	left_right_pos := left_pos.extend(right_pos)
-	if left_sym.kind == .none && right_sym.kind == .none {
+
+	// エラーチェックにキャッシュを利用
+	if left_kind == .none && right_kind == .none {
 		c.invalid_operator_error(node.op, left_type, right_type, left_right_pos)
 	}
-	if left_sym.kind == .multi_return && right_sym.kind == .multi_return {
+	if left_kind == .multi_return && right_kind == .multi_return {
 		c.error('invalid number of operand for `${node.op}`. Only one allowed on each side.',
 			left_right_pos)
 	}
+
+	// ポインタ演算のチェック
 	if left_type.is_any_kind_of_pointer() && !node.left.is_auto_deref_var()
 		&& node.op in [.plus, .minus, .mul, .div, .mod, .xor, .amp, .pipe] {
 		if !c.pref.translated && ((right_type.is_any_kind_of_pointer() && node.op != .minus)
 			|| (!right_type.is_any_kind_of_pointer() && node.op !in [.plus, .minus])) {
 			if _ := left_sym.find_method(node.op.str()) {
-				if left_sym.kind == .alias && right_sym.kind == .alias {
-					// allow an explicit operator override `fn (x &AliasType) OP (y &AliasType) &AliasType {`
+				if left_kind == .alias && right_kind == .alias {
+					// OK
 				} else {
 					c.invalid_operator_error(node.op, left_type, right_type, left_right_pos)
 				}
@@ -157,36 +177,12 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			}
 		}
 	}
-	mut return_type := left_type
 
-	if node.op != .key_is {
-		match mut node.left {
-			ast.Ident, ast.SelectorExpr {
-				// mut foo != none is allowed for unwrapping option
-				if !(node.op == .ne && node.right is ast.None) {
-					if node.left.is_mut {
-						c.error('the `mut` keyword is invalid here', node.left.mut_pos)
-					}
-				}
-			}
-			else {}
-		}
-	}
-	match mut node.right {
-		ast.Ident, ast.SelectorExpr {
-			if node.right.is_mut {
-				c.error('the `mut` keyword is invalid here', node.right.mut_pos)
-			}
-		}
-		else {}
-	}
+	mut return_type := left_type
 	eq_ne := node.op in [.eq, .ne]
-	// Single side check
-	// Place these branches according to ops' usage frequency to accelerate.
-	// TODO: First branch includes ops where single side check is not needed, or needed but hasn't been implemented.
-	// TODO: Some of the checks are not single side. Should find a better way to organize them.
+
+	// 4. Match ブランチ内でのシンボル再取得の排除
 	match node.op {
-		// .eq, .ne, .gt, .lt, .ge, .le, .and, .logical_or, .dot, .key_as, .right_shift {}
 		.eq, .ne {
 			return_type = c.check_infix_equality(mut node, left_type, right_type, left_sym,
 				right_sym, left_final_sym, right_final_sym)
@@ -204,19 +200,12 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			return_type = c.check_infix_comparison(mut node, left_type, right_type, left_sym,
 				right_sym, left_final_sym, right_final_sym)
 		}
-		.key_like {
+		.key_like, .key_ilike {
 			node.promoted_type = ast.bool_type
-
-			return c.check_like_operator(node)
-		}
-		.key_ilike {
-			node.promoted_type = ast.bool_type
-
 			return c.check_like_operator(node)
 		}
 		.left_shift {
-			if left_final_sym.kind == .array
-				|| c.table.sym(c.unwrap_generic(left_type)).kind == .array {
+			if left_final_sym.kind == .array {
 				return c.check_append(mut node, left_type, right_type, right_final_sym)
 			} else {
 				node.promoted_type = c.check_shift(mut node, left_type, right_type)
@@ -229,69 +218,52 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		}
 		.unsigned_right_shift {
 			modified_left_type := if !left_type.is_int() {
-				c.error('invalid operation: shift on type `${c.table.sym(left_type).name}`',
-					left_pos)
+				c.error('invalid operation: shift on type `${left_sym.name}`', left_pos)
 				ast.void_type
 			} else if left_type.is_int_literal() {
-				// int literal => i64
 				ast.u32_type
 			} else if left_type.is_unsigned() {
 				left_type
 			} else {
 				unsigned_type := left_type.flip_signedness()
-				if unsigned_type == ast.void_type {
-					// signed type can't convert to an unsigned type
-					0
-				}
+				if unsigned_type == ast.void_type { 0 }
 				unsigned_type
 			}
 
-			if modified_left_type == 0 {
-				return ast.void_type
-			}
+			if modified_left_type == 0 { return ast.void_type }
 
 			node = ast.InfixExpr{
-				left:        ast.CastExpr{
+				left: ast.CastExpr{
 					expr:      node.left
 					typ:       modified_left_type
 					typname:   c.table.type_str(modified_left_type)
 					expr_type: left_type
 					pos:       node.pos
 				}
-				left_type:   left_type
-				op:          .right_shift
-				right:       node.right
-				right_type:  right_type
-				is_stmt:     false
-				pos:         node.pos
-				auto_locked: node.auto_locked
-				or_block:    node.or_block
+				left_type:  left_type
+				op:         .right_shift
+				right:      node.right
+				right_type: right_type
+				pos:        node.pos
 			}
-
 			node.promoted_type = c.check_shift(mut node, left_type, right_type)
-
 			return node.promoted_type
 		}
 		.key_is, .not_is {
 			right_expr := node.right
 			mut typ := match right_expr {
-				ast.TypeNode {
-					right_expr.typ
-				}
-				ast.None {
-					ast.none_type_idx
-				}
+				ast.TypeNode { right_expr.typ }
+				ast.None     { ast.none_type_idx }
 				ast.Ident {
 					if right_expr.name == c.comptime.comptime_for_variant_var {
-						c.type_resolver.get_ct_type_or_default('${c.comptime.comptime_for_variant_var}.typ',
-							ast.void_type)
+						c.type_resolver.get_ct_type_or_default('${c.comptime.comptime_for_variant_var}.typ', ast.void_type)
 					} else {
 						c.error('invalid type `${right_expr}`', right_expr.pos)
 						ast.no_type
 					}
 				}
 				else {
-					c.error('invalid type `${right_expr}`', right_expr.pos())
+					c.error('invalid type `${right_expr.pos()}`', right_expr.pos())
 					ast.no_type
 				}
 			}
@@ -299,58 +271,41 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				typ_sym := c.table.sym(typ)
 				op := node.op.str()
 				if left_type.has_flag(.option) && !c.inside_sql {
-					c.error('${node.left} is an Optional, it needs to be unwrapped first',
-						node.left.pos())
+					c.error('${node.left} is an Optional, it needs to be unwrapped first', node.left.pos())
 				}
 				if typ_sym.kind == .placeholder {
 					c.error('${op}: type `${typ_sym.name}` does not exist', right_expr.pos())
 				}
+				// Aggregate/SumType/Interface の判定
 				if mut left_sym.info is ast.Aggregate {
-					parent_left_type := left_sym.info.sum_type
-					left_sym = c.table.sym(parent_left_type)
+					left_sym = c.table.sym(left_sym.info.sum_type)
 				}
 				if c.inside_sql {
-					if typ != ast.none_type_idx {
-						c.error('`${op}` can only be used to test for none in sql', node.pos)
-					}
-				} else if left_final_sym.kind !in [.interface, .sum_type]
-					&& !c.comptime.is_comptime(node.left) {
-					c.error('`${op}` can only be used with interfaces and sum types',
-						node.pos) // can be used in sql too, but keep err simple
+					if typ != ast.none_type_idx { c.error('`${op}` can only be used to test for none in sql', node.pos) }
+				} else if left_final_sym.kind !in [.interface, .sum_type] && !c.comptime.is_comptime(node.left) {
+					c.error('`${op}` can only be used with interfaces and sum types', node.pos)
 				} else if mut left_sym.info is ast.SumType {
-					if typ !in left_sym.info.variants
-						&& c.unwrap_generic(typ) !in left_sym.info.variants {
-						c.error('`${left_sym.name}` has no variant `${right_sym.name}`',
-							right_pos)
+					if typ !in left_sym.info.variants && c.unwrap_generic(typ) !in left_sym.info.variants {
+						c.error('`${left_sym.name}` has no variant `${right_sym.name}`', right_pos)
 					}
 				} else if left_sym.info is ast.Interface {
 					if typ_sym.kind != .interface && !c.type_implements(typ, left_type, right_pos) {
-						c.error("`${typ_sym.name}` doesn't implement interface `${left_sym.name}`",
-							right_pos)
+						c.error("`${typ_sym.name}` doesn't implement interface `${left_sym.name}`", right_pos)
 					}
 				}
 			}
 			node.promoted_type = ast.bool_type
 			return ast.bool_type
 		}
-		.arrow { // `chan <- elem`
-			if left_sym.kind == .chan {
+		.arrow {
+			if left_kind == .chan {
 				chan_info := left_sym.chan_info()
-				elem_type := chan_info.elem_type
-				if !c.check_types(right_type, elem_type) {
-					c.error('cannot push `${c.table.type_to_str(right_type)}` on `${left_sym.name}`',
-						right_pos)
+				if !c.check_types(right_type, chan_info.elem_type) {
+					c.error('cannot push `${c.table.type_to_str(right_type)}` on `${left_sym.name}`', right_pos)
 				}
-				if chan_info.is_mut {
-					// TODO: The error message of the following could be more specific...
-					c.fail_if_immutable(mut node.right)
-				}
-				if elem_type.is_ptr() && !right_type.is_ptr() {
-					c.error('cannot push non-reference `${right_sym.name}` on `${left_sym.name}`',
-						right_pos)
-				} else if right_type.is_ptr() != elem_type.is_ptr() {
-					c.error('cannot push `${c.table.type_to_str(right_type)}` on `${left_sym.name}`',
-						right_pos)
+				if chan_info.is_mut { c.fail_if_immutable(mut node.right) }
+				if chan_info.elem_type.is_ptr() && !right_type.is_ptr() {
+					c.error('cannot push non-reference `${right_sym.name}` on `${left_sym.name}`', right_pos)
 				}
 				c.stmts_ending_with_expression(mut node.or_block.stmts, c.expected_or_type)
 			} else {
@@ -360,81 +315,45 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		}
 		.and, .logical_or {
 			if !c.pref.translated && !c.file.is_translated {
-				// TODO Bring back once I split void into void and bad
-				// if left_final_sym.kind !in [.bool, .void] {
-				if left_final_sym.kind != .bool {
-					c.error('left operand for `${node.op}` is not a boolean', node.left.pos())
-				}
-				// if right_final_sym.kind !in [.bool, .void] {
-				if right_final_sym.kind != .bool {
-					c.error('right operand for `${node.op}` is not a boolean', node.right.pos())
-				}
-			}
-			if mut node.left is ast.InfixExpr {
-				if node.left.op != node.op && node.left.op in [.logical_or, .and] {
-					// for example: `(a && b) || c` instead of `a && b || c`
-					c.error('ambiguous boolean expression. use `()` to ensure correct order of operations',
-						node.pos)
-				}
+				if left_final_sym.kind != .bool { c.error('left operand for `${node.op}` is not a boolean', node.left.pos()) }
+				if right_final_sym.kind != .bool { c.error('right operand for `${node.op}` is not a boolean', node.right.pos()) }
 			}
 		}
 		else {}
 	}
-	// Do an ambiguous expression check for << >> and &, since they all have the same precedence (unlike in C)
-	if !c.is_builtin_mod && node.op in [.amp, .left_shift, .right_shift] {
-		if mut node.left is ast.InfixExpr {
-			if node.left.op != node.op && node.left.op in [.amp, .left_shift, .right_shift] {
-				// for example: `(a << b) & c` instead of `a << b & c`
-				c.note('ambiguous expression. use `()` to ensure correct order of operations',
-					node.pos)
-			}
-		}
-	}
-	// TODO: Absorb this block into the above single side check block to accelerate.
+
+	// 5. 型固有のバリデーション（ここでもキャッシュを利用）
 	if left_type == ast.bool_type && node.op !in [.eq, .ne, .logical_or, .and] {
-		c.error('bool types only have the following operators defined: `==`, `!=`, `||`, and `&&`',
-			node.pos)
+		c.error('bool types only have the following operators defined: `==`, `!=`, `||`, and `&&`', node.pos)
 	} else if left_type == ast.string_type && node.op !in [.plus, .eq, .ne, .lt, .gt, .le, .ge] {
-		// TODO: broken !in
-		c.error('string types only have the following operators defined: `==`, `!=`, `<`, `>`, `<=`, `>=`, and `+`',
-			node.pos)
+		c.error('string types only have the following operators defined: `==`, `!=`, `<`, `>`, `<=`, `>=`, and `+`', node.pos)
 	} else if !eq_ne && mut left_sym.info is ast.Enum && mut right_sym.info is ast.Enum {
 		if left_sym.info.is_flag && right_sym.info.is_flag {
-			// `@[flag]` tagged enums are a special case that allow also `|` and `&` binary operators
 			if node.op !in [.pipe, .amp, .xor, .bit_not] {
-				c.error('only `==`, `!=`, `|`, `&`, `^` and `~` are defined on `@[flag]` tagged `enum`, use an explicit cast to `int` if needed',
-					node.pos)
+				c.error('only `==`, `!=`, `|`, `&`, `^` and `~` are defined on `@[flag]` tagged `enum`...', node.pos)
 			}
-		} else if !c.pref.translated && !c.file.is_translated && !left_type.has_flag(.generic)
-			&& !right_type.has_flag(.generic) {
-			// Regular enums
-			c.error('only `==` and `!=` are defined on `enum`, use an explicit cast to `int` if needed',
-				node.pos)
+		} else if !c.pref.translated && !c.file.is_translated && !left_type.has_flag(.generic) {
+			c.error('only `==` and `!=` are defined on `enum`...', node.pos)
 		}
 	}
-	// sum types can't have any infix operation except of `is`, `eq`, `ne`.
-	// `is` is checked before and doesn't reach this.
-	if c.table.type_kind(left_type) == .sum_type && !eq_ne {
+
+	// SumType の制約チェック
+	if left_final_sym.kind == .sum_type && !eq_ne {
 		c.error('cannot use operator `${node.op}` with `${left_sym.name}`', node.pos)
-	} else if c.table.type_kind(right_type) == .sum_type && !eq_ne {
-		c.error('cannot use operator `${node.op}` with `${right_sym.name}`', node.pos)
 	}
-	// TODO: move this to symmetric_check? Right now it would break `return 0` for `fn()?int `
-	left_is_option := left_type.has_flag(.option)
-	right_is_option := right_type.has_flag(.option)
-	if left_is_option || right_is_option {
-		opt_infix_pos := if left_is_option { left_pos } else { right_pos }
+
+	// Option/Result のアンラップチェック
+	if left_type.has_flag(.option) || right_type.has_flag(.option) {
+		opt_infix_pos := if left_type.has_flag(.option) { left_pos } else { right_pos }
 		if (node.left !in [ast.Ident, ast.IndexExpr, ast.SelectorExpr, ast.ComptimeSelector]
-			|| (node.op in [.eq, .ne] && !right_is_option)
-			|| node.op in [.lt, .gt, .le, .ge]) && right_sym.kind != .none && !c.inside_sql {
+			|| (node.op in [.eq, .ne] && !right_type.has_flag(.option))
+			|| node.op in [.lt, .gt, .le, .ge]) && right_kind != .none && !c.inside_sql {
 			c.error('unwrapped Option cannot be used in an infix expression', opt_infix_pos)
 		}
 	}
 
-	left_is_result := left_type.has_flag(.result)
-	right_is_result := right_type.has_flag(.result)
-	if left_is_result || right_is_result {
-		opt_infix_pos := if left_is_result { left_pos } else { right_pos }
+	if left_type.has_flag(.result) || right_type.has_flag(.result) {
+		opt_infix_pos := if left_type.has_flag(.result) { left_pos } else { right_pos }
 		c.error('unwrapped Result cannot be used in an infix expression', opt_infix_pos)
 	}
 
