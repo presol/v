@@ -349,7 +349,7 @@ pub fn (t Type) is_full() bool {
 // return nr_muls for `t`
 @[inline]
 pub fn (t Type) nr_muls() int {
-	return (t >> 16) & 0xff
+	return int((t >> 16) & 0xff)
 }
 
 // return true if `t` is a pointer (nr_muls>0)

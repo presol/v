@@ -188,441 +188,21 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	match node.op {
 		// .eq, .ne, .gt, .lt, .ge, .le, .and, .logical_or, .dot, .key_as, .right_shift {}
 		.eq, .ne {
-			if node.left is ast.CallExpr && node.left.or_block.stmts.len > 0 {
-				c.check_expr_option_or_result_call(node.left, left_type)
-			}
-			if node.right is ast.CallExpr && node.right.or_block.stmts.len > 0 {
-				c.check_expr_option_or_result_call(node.right, right_type)
-			}
-			if left_type in ast.integer_type_idxs && right_type in ast.integer_type_idxs {
-				is_left_type_signed := left_type in ast.signed_integer_type_idxs
-				is_right_type_signed := right_type in ast.signed_integer_type_idxs
-				if !is_left_type_signed && mut node.right is ast.IntegerLiteral {
-					if node.right.val.int() < 0 && left_type in ast.int_promoted_type_idxs {
-						lt := c.table.sym(left_type).name
-						c.error('`${lt}` cannot be compared with negative value', node.right.pos)
-					}
-				} else if !is_right_type_signed && mut node.left is ast.IntegerLiteral {
-					if node.left.val.int() < 0 && right_type in ast.int_promoted_type_idxs {
-						rt := c.table.sym(right_type).name
-						c.error('negative value cannot be compared with `${rt}`', node.left.pos)
-					}
-				} else if is_left_type_signed != is_right_type_signed
-					&& left_type != ast.int_literal_type_idx
-					&& right_type != ast.int_literal_type_idx {
-					ls, _ := c.table.type_size(left_type)
-					rs, _ := c.table.type_size(right_type)
-					// prevent e.g. `u32 == i16` but not `u16 == i32` as max_u16 fits in i32
-					// TODO: u32 == i32, change < to <=
-					if !c.pref.translated && ((is_left_type_signed && ls < rs)
-						|| (is_right_type_signed && rs < ls)) {
-						lt := c.table.sym(left_type).name
-						rt := c.table.sym(right_type).name
-						c.error('`${lt}` cannot be compared with `${rt}`', node.pos)
-					}
-				}
-			}
-
-			// Do not allow comparing nil to non-pointers
-			if node.left.is_nil() {
-				mut final_type := right_type
-				if mut right_sym.info is ast.Alias
-					&& right_sym.info.parent_type.is_any_kind_of_pointer() {
-					final_type = right_sym.info.parent_type
-				}
-				if !final_type.is_any_kind_of_pointer() && (right_final_sym.kind != .function
-					|| (right_final_sym.language != .c && right_final_sym.kind == .placeholder))
-					&& !right_final_sym.is_heap() {
-					rt := c.table.sym(right_type).name
-					c.error('cannot compare with `nil` because `${rt}` is not a pointer',
-						node.pos)
-				}
-			}
-
-			if node.right.is_nil() {
-				mut final_type := left_type
-				if mut left_sym.info is ast.Alias
-					&& left_sym.info.parent_type.is_any_kind_of_pointer() {
-					final_type = left_sym.info.parent_type
-				}
-				if !final_type.is_any_kind_of_pointer() && (left_final_sym.kind != .function
-					|| (left_final_sym.language != .c && left_final_sym.kind == .placeholder))
-					&& !left_final_sym.is_heap() {
-					lt := c.table.sym(left_type).name
-					c.error('cannot compare with `nil` because `${lt}` is not a pointer',
-						node.pos)
-				}
-			}
+			return_type = c.check_infix_equality(mut node, left_type, right_type, left_sym,
+				right_sym, left_final_sym, right_final_sym)
 		}
 		.key_in, .not_in {
-			match right_final_sym.kind {
-				.array {
-					if left_sym.kind !in [.sum_type, .interface] {
-						elem_type := right_final_sym.array_info().elem_type
-						if node.left.is_auto_deref_var() {
-							left_type = left_type.deref()
-						}
-						c.check_expected(left_type, elem_type) or {
-							c.error('left operand to `${node.op}` does not match the array element type: ${err.msg()}',
-								left_right_pos)
-						}
-						if mut node.right is ast.ArrayInit {
-							c.check_duplicated_items(node.right)
-						}
-					} else {
-						if mut node.right is ast.ArrayInit {
-							for i, typ in node.right.expr_types {
-								c.ensure_type_exists(typ, node.right.exprs[i].pos())
-							}
-						} else {
-							elem_type := right_final_sym.array_info().elem_type
-							if node.left.is_auto_deref_var() {
-								left_type = left_type.deref()
-							}
-							c.check_expected(left_type, elem_type) or {
-								c.error('left operand to `${node.op}` does not match the array element type: ${err.msg()}',
-									left_right_pos)
-							}
-						}
-					}
-				}
-				.map {
-					map_info := right_final_sym.map_info()
-					c.check_expected(left_type, map_info.key_type) or {
-						c.error('left operand to `${node.op}` does not match the map key type: ${err.msg()}',
-							left_right_pos)
-					}
-					node.left_type = map_info.key_type
-				}
-				.array_fixed {
-					if left_sym.kind !in [.sum_type, .interface] {
-						elem_type := right_final_sym.array_fixed_info().elem_type
-						c.check_expected(left_type, elem_type) or {
-							c.error('left operand to `${node.op}` does not match the fixed array element type: ${err.msg()}',
-								left_right_pos)
-						}
-					}
-				}
-				else {
-					if mut node.right is ast.RangeExpr {
-						if !left_final_sym.is_number() && left_final_sym.kind != .rune {
-							c.error('`${left_final_sym.name}` is an invalid type for range expression',
-								node.pos)
-						}
-					} else {
-						c.error('`${node.op.str()}` can only be used with arrays and maps',
-							node.pos)
-					}
-				}
-			}
-			if mut node.left is ast.CallExpr {
-				if node.left.return_type.has_flag(.option)
-					|| node.left.return_type.has_flag(.result) {
-					option_or_result := if node.left.return_type.has_flag(.option) {
-						'option'
-					} else {
-						'result'
-					}
-					c.error('unwrapped ${option_or_result} cannot be used with `${node.op.str()}`',
-						left_pos)
-				}
-			}
-			node.promoted_type = ast.bool_type
+			return_type = c.check_infix_in_ops(mut node, left_type, right_type, left_sym,
+				right_sym, left_final_sym, right_final_sym)
 			return ast.bool_type
 		}
 		.plus, .minus, .mul, .div, .mod, .xor, .amp, .pipe {
-			// binary operators that expect matching types
-			unwrapped_left_type := c.unwrap_generic(left_type)
-			left_sym = c.table.sym(unwrapped_left_type)
-			unwrapped_right_type := c.unwrap_generic(right_type)
-			right_sym = c.table.sym(unwrapped_right_type)
-			if mut right_sym.info is ast.Alias && (right_sym.info.language != .c
-				&& c.mod == c.table.type_to_str(unwrapped_right_type).split('.')[0]
-				&& (right_final_sym.is_primitive() || right_final_sym.kind == .enum)) {
-				right_sym = unsafe { right_final_sym }
-			}
-			if mut left_sym.info is ast.Alias && (left_sym.info.language != .c
-				&& c.mod == c.table.type_to_str(unwrapped_left_type).split('.')[0]
-				&& (left_final_sym.is_primitive() || left_final_sym.kind == .enum)) {
-				left_sym = unsafe { left_final_sym }
-			}
-			op_str := node.op.str()
-			if c.pref.translated && node.op in [.plus, .minus, .mul]
-				&& unwrapped_left_type.is_any_kind_of_pointer()
-				&& unwrapped_right_type.is_any_kind_of_pointer() {
-				return_type = left_type
-			} else if !c.pref.translated && left_sym.info is ast.Alias
-				&& !left_final_sym.is_primitive() {
-				if left_sym.has_method(op_str) {
-					if method := left_sym.find_method(op_str) {
-						return_type = method.return_type
-					} else {
-						return_type = left_type
-					}
-				} else if left_final_sym.has_method_with_generic_parent(op_str) {
-					if method := left_final_sym.find_method_with_generic_parent(op_str) {
-						return_type = method.return_type
-					} else {
-						return_type = left_type
-					}
-				} else {
-					left_name := c.table.type_to_str(unwrapped_left_type)
-					right_name := c.table.type_to_str(unwrapped_right_type)
-					if left_name == right_name {
-						c.error('undefined operation `${left_name}` ${op_str} `${right_name}`',
-							left_right_pos)
-					} else {
-						c.error('mismatched types `${left_name}` and `${right_name}`',
-							left_right_pos)
-					}
-				}
-			} else if !c.pref.translated && right_sym.info is ast.Alias
-				&& !right_final_sym.is_primitive() {
-				if right_sym.has_method(op_str) {
-					if method := right_sym.find_method(op_str) {
-						return_type = method.return_type
-					} else {
-						return_type = right_type
-					}
-				} else if right_final_sym.has_method_with_generic_parent(op_str) {
-					if method := right_final_sym.find_method_with_generic_parent(op_str) {
-						return_type = method.return_type
-					} else {
-						return_type = right_type
-					}
-				} else if left_sym.has_method(op_str) {
-					if method := left_sym.find_method(op_str) {
-						return_type = method.return_type
-					} else {
-						return_type = left_type
-					}
-				} else if left_final_sym.has_method_with_generic_parent(op_str) {
-					if method := left_final_sym.find_method_with_generic_parent(op_str) {
-						return_type = method.return_type
-					} else {
-						return_type = left_type
-					}
-				} else {
-					left_name := c.table.type_to_str(unwrapped_left_type)
-					right_name := c.table.type_to_str(unwrapped_right_type)
-					if left_name == right_name {
-						c.error('undefined operation `${left_name}` ${op_str} `${right_name}`',
-							left_right_pos)
-					} else {
-						c.error('mismatched types `${left_name}` and `${right_name}`',
-							left_right_pos)
-					}
-				}
-			}
-
-			if ((unwrapped_left_type.is_ptr() && !node.left.is_auto_deref_var())
-				|| (unwrapped_right_type.is_ptr() && !node.right.is_auto_deref_var()))
-				&& node.op !in [.plus, .minus] {
-				c.error('infix `${node.op}` is not defined for pointer values', left_right_pos)
-			}
-
-			if !c.pref.translated && left_sym.kind in [.array, .array_fixed, .map, .struct] {
-				if left_sym.has_method_with_generic_parent(op_str) {
-					if method := left_sym.find_method_with_generic_parent(op_str) {
-						return_type = method.return_type
-					} else {
-						return_type = left_type
-					}
-				} else {
-					left_name := c.table.type_to_str(unwrapped_left_type)
-					right_name := c.table.type_to_str(unwrapped_right_type)
-					if left_name == right_name {
-						c.error('undefined operation `${left_name}` ${op_str} `${right_name}`',
-							left_right_pos)
-					} else {
-						c.error('mismatched types `${left_name}` and `${right_name}`',
-							left_right_pos)
-					}
-				}
-			} else if !c.pref.translated && right_sym.kind in [.array, .array_fixed, .map, .struct] {
-				if right_sym.has_method_with_generic_parent(op_str) {
-					if method := right_sym.find_method_with_generic_parent(op_str) {
-						return_type = method.return_type
-					} else {
-						return_type = right_type
-					}
-				} else {
-					left_name := c.table.type_to_str(unwrapped_left_type)
-					right_name := c.table.type_to_str(unwrapped_right_type)
-					if left_name == right_name {
-						c.error('undefined operation `${left_name}` ${op_str} `${right_name}`',
-							left_right_pos)
-					} else {
-						c.error('mismatched types `${left_name}` and `${right_name}`',
-							left_right_pos)
-					}
-				}
-			} else if node.left.is_auto_deref_var() || node.right.is_auto_deref_var() {
-				deref_left_type := if node.left.is_auto_deref_var() {
-					unwrapped_left_type.deref()
-				} else {
-					unwrapped_left_type
-				}
-				deref_right_type := if node.right.is_auto_deref_var() {
-					unwrapped_right_type.deref()
-				} else {
-					unwrapped_right_type
-				}
-				left_name := c.table.type_to_str(ast.mktyp(deref_left_type))
-				right_name := c.table.type_to_str(ast.mktyp(deref_right_type))
-				if left_name != right_name {
-					c.error('mismatched types `${left_name}` and `${right_name}`', left_right_pos)
-				}
-			} else {
-				unaliased_left_type := c.table.unalias_num_type(unwrapped_left_type)
-				unalias_right_type := c.table.unalias_num_type(unwrapped_right_type)
-				mut promoted_type := c.promote_keeping_aliases(unaliased_left_type, unalias_right_type,
-					left_sym.kind, right_sym.kind)
-				// subtract pointers is allowed in unsafe block
-				is_allowed_pointer_arithmetic := left_type.is_any_kind_of_pointer()
-					&& right_type.is_any_kind_of_pointer() && node.op == .minus
-				if is_allowed_pointer_arithmetic {
-					promoted_type = ast.int_type
-				}
-				if promoted_type.idx() == ast.void_type_idx {
-					left_name := c.table.type_to_str(unwrapped_left_type)
-					right_name := c.table.type_to_str(unwrapped_right_type)
-					c.error('mismatched types `${left_name}` and `${right_name}`', left_right_pos)
-				} else if promoted_type.has_option_or_result() {
-					s := c.table.type_to_str(promoted_type)
-					c.error('`${node.op}` cannot be used with `${s}`', node.pos)
-				} else if promoted_type.is_float() {
-					if node.op in [.mod, .xor, .amp, .pipe] {
-						side := if unwrapped_left_type == promoted_type { 'left' } else { 'right' }
-						pos := if unwrapped_left_type == promoted_type {
-							left_pos
-						} else {
-							right_pos
-						}
-						name := if unwrapped_left_type == promoted_type {
-							left_sym.name
-						} else {
-							right_sym.name
-						}
-						if node.op == .mod {
-							c.error('float modulo not allowed, use math.fmod() instead',
-								pos)
-						} else {
-							c.error('${side} type of `${op_str}` cannot be non-integer type `${name}`',
-								pos)
-						}
-					}
-				}
-				if node.op in [.div, .mod] {
-					c.check_div_mod_by_zero(node.right, node.op)
-				}
-
-				left_sym = c.table.sym(unwrapped_left_type)
-				right_sym = c.table.sym(unwrapped_right_type)
-				if left_sym.info is ast.Alias && left_final_sym.is_primitive() {
-					if left_sym.has_method(op_str) {
-						if method := left_sym.find_method(op_str) {
-							return_type = method.return_type
-						}
-					}
-				} else if right_sym.info is ast.Alias && right_final_sym.is_primitive() {
-					if right_sym.has_method(op_str) {
-						if method := right_sym.find_method(op_str) {
-							return_type = method.return_type
-						}
-					}
-				}
-				return_sym := c.table.sym(return_type)
-				if return_sym.info !is ast.Alias {
-					return_type = promoted_type
-				}
-			}
+			return_type = c.check_infix_arithmetic(mut node, left_type, right_type, left_sym,
+				right_sym, left_final_sym, right_final_sym)
 		}
 		.gt, .lt, .ge, .le {
-			unwrapped_left_type := c.unwrap_generic(left_type)
-			left_sym = c.table.sym(unwrapped_left_type)
-			if left_sym.kind == .alias && !left_sym.has_method_with_generic_parent(node.op.str()) {
-				left_sym = c.table.final_sym(unwrapped_left_type)
-			}
-			unwrapped_right_type := c.unwrap_generic(right_type)
-			right_sym = c.table.sym(unwrapped_right_type)
-			if right_sym.kind == .alias && !right_sym.has_method_with_generic_parent(node.op.str()) {
-				right_sym = c.table.final_sym(unwrapped_right_type)
-			}
-			if left_sym.kind in [.array, .array_fixed] && right_sym.kind in [.array, .array_fixed] {
-				c.error('only `==` and `!=` are defined on arrays', node.pos)
-			} else if left_sym.info is ast.Struct && left_sym.info.generic_types.len > 0 {
-				node.promoted_type = ast.bool_type
-				return ast.bool_type
-			} else if left_sym.kind == .struct && right_sym.kind == .struct && node.op in [.eq, .lt] {
-				if !(left_sym.has_method(node.op.str()) && right_sym.has_method(node.op.str())) {
-					left_name := c.table.type_to_str(unwrapped_left_type)
-					right_name := c.table.type_to_str(unwrapped_right_type)
-					if left_name == right_name {
-						if !(node.op == .lt && c.pref.translated) {
-							// Allow `&Foo < &Foo` in translated code.
-							// TODO: maybe in unsafe as well?
-							c.error('undefined operation `${left_name}` ${node.op.str()} `${right_name}`',
-								left_right_pos)
-						}
-					} else {
-						c.error('mismatched types `${left_name}` and `${right_name}`',
-							left_right_pos)
-					}
-				}
-			}
-			if left_sym.kind == .struct && right_sym.kind == .struct {
-				if !left_sym.has_method('<') && node.op in [.ge, .le] {
-					c.error('cannot use `${node.op}` as `<` operator method is not defined',
-						left_right_pos)
-				} else if !left_sym.has_method('<') && node.op == .gt {
-					c.error('cannot use `>` as `<=` operator method is not defined', left_right_pos)
-				}
-			} else if left_type.has_flag(.generic) && right_type.has_flag(.generic) {
-				// Try to unwrap the generic type to make sure that
-				// the below check works as expected
-				left_gen_type := c.unwrap_generic(left_type)
-				gen_sym := c.table.sym(left_gen_type)
-				need_overload := gen_sym.kind in [.struct, .interface]
-				if need_overload && !gen_sym.has_method_with_generic_parent('<')
-					&& node.op in [.ge, .le] {
-					c.error('cannot use `${node.op}` as `<` operator method is not defined',
-						left_right_pos)
-				} else if need_overload && !gen_sym.has_method_with_generic_parent('<')
-					&& node.op == .gt {
-					c.error('cannot use `>` as `<=` operator method is not defined', left_right_pos)
-				}
-			} else if left_type in ast.integer_type_idxs && right_type in ast.integer_type_idxs {
-				is_left_type_signed := left_type in ast.signed_integer_type_idxs
-					|| left_type == ast.int_literal_type_idx
-				is_right_type_signed := right_type in ast.signed_integer_type_idxs
-					|| right_type == ast.int_literal_type_idx
-				if is_left_type_signed != is_right_type_signed {
-					if is_right_type_signed {
-						if mut node.right is ast.IntegerLiteral {
-							if node.right.val.int() < 0 {
-								c.error('unsigned integer cannot be compared with negative value',
-									node.right.pos)
-							}
-						}
-					} else if is_left_type_signed {
-						if mut node.left is ast.IntegerLiteral {
-							if node.left.val.int() < 0 {
-								c.error('unsigned integer cannot be compared with negative value',
-									node.left.pos)
-							}
-						}
-					}
-				}
-			} else if node.left !in [ast.Ident, ast.SelectorExpr, ast.ComptimeSelector]
-				&& (left_type.has_flag(.option) || right_type.has_flag(.option)) {
-				opt_comp_pos := if left_type.has_flag(.option) { left_pos } else { right_pos }
-				c.error('unwrapped Option cannot be compared in an infix expression',
-					opt_comp_pos)
-			}
-			if node.left.is_nil() || node.right.is_nil() {
-				c.error('cannot use `${node.op.str()}` with `nil`', node.pos)
-			}
+			return_type = c.check_infix_comparison(mut node, left_type, right_type, left_sym,
+				right_sym, left_final_sym, right_final_sym)
 		}
 		.key_like {
 			node.promoted_type = ast.bool_type
@@ -858,16 +438,402 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		c.error('unwrapped Result cannot be used in an infix expression', opt_infix_pos)
 	}
 
+	return c.check_infix_post_compatibility(mut node, left_type, right_type, left_sym,
+		right_sym, return_type, left_right_pos)
+}
+
+fn (mut c Checker) check_infix_equality(mut node ast.InfixExpr, left_type ast.Type, right_type ast.Type, left_sym_orig &ast.TypeSymbol, right_sym_orig &ast.TypeSymbol, left_final_sym &ast.TypeSymbol, right_final_sym &ast.TypeSymbol) ast.Type {
+	mut left_sym := unsafe { &ast.TypeSymbol(left_sym_orig) }
+	mut right_sym := unsafe { &ast.TypeSymbol(right_sym_orig) }
+
+	if node.left is ast.CallExpr && node.left.or_block.stmts.len > 0 {
+		c.check_expr_option_or_result_call(node.left, left_type)
+	}
+	if node.right is ast.CallExpr && node.right.or_block.stmts.len > 0 {
+		c.check_expr_option_or_result_call(node.right, right_type)
+	}
+	if left_type in ast.integer_type_idxs && right_type in ast.integer_type_idxs {
+		is_left_type_signed := left_type in ast.signed_integer_type_idxs
+		is_right_type_signed := right_type in ast.signed_integer_type_idxs
+		if !is_left_type_signed && mut node.right is ast.IntegerLiteral {
+			if node.right.val.int() < 0 && left_type in ast.int_promoted_type_idxs {
+				lt := c.table.sym(left_type).name
+				c.error('`${lt}` cannot be compared with negative value', node.right.pos)
+			}
+		} else if !is_right_type_signed && mut node.left is ast.IntegerLiteral {
+			if node.left.val.int() < 0 && right_type in ast.int_promoted_type_idxs {
+				rt := c.table.sym(right_type).name
+				c.error('negative value cannot be compared with `${rt}`', node.left.pos)
+			}
+		} else if is_left_type_signed != is_right_type_signed
+			&& left_type != ast.int_literal_type_idx && right_type != ast.int_literal_type_idx {
+			ls, _ := c.table.type_size(left_type)
+			rs, _ := c.table.type_size(right_type)
+			// prevent e.g. `u32 == i16` but not `u16 == i32` as max_u16 fits in i32
+			// TODO: u32 == i32, change < to <=
+			if !c.pref.translated && ((is_left_type_signed && ls < rs)
+				|| (is_right_type_signed && rs < ls)) {
+				lt := c.table.sym(left_type).name
+				rt := c.table.sym(right_type).name
+				c.error('`${lt}` cannot be compared with `${rt}`', node.pos)
+			}
+		}
+	}
+
+	// Do not allow comparing nil to non-pointers
+	if node.left.is_nil() {
+		mut final_type := right_type
+		if mut right_sym.info is ast.Alias && right_sym.info.parent_type.is_any_kind_of_pointer() {
+			final_type = right_sym.info.parent_type
+		}
+		if !final_type.is_any_kind_of_pointer() && (right_final_sym.kind != .function
+			|| (right_final_sym.language != .c && right_final_sym.kind == .placeholder))
+			&& !right_final_sym.is_heap() {
+			rt := c.table.sym(right_type).name
+			c.error('cannot compare with `nil` because `${rt}` is not a pointer', node.pos)
+		}
+	}
+
+	if node.right.is_nil() {
+		mut final_type := left_type
+		if mut left_sym.info is ast.Alias && left_sym.info.parent_type.is_any_kind_of_pointer() {
+			final_type = left_sym.info.parent_type
+		}
+		if !final_type.is_any_kind_of_pointer() && (left_final_sym.kind != .function
+			|| (left_final_sym.language != .c && left_final_sym.kind == .placeholder))
+			&& !left_final_sym.is_heap() {
+			lt := c.table.sym(left_type).name
+			c.error('cannot compare with `nil` because `${lt}` is not a pointer', node.pos)
+		}
+	}
+
+	node.promoted_type = ast.bool_type
+	return ast.bool_type
+}
+
+fn (mut c Checker) check_infix_in_ops(mut node ast.InfixExpr, left_type_orig ast.Type, right_type ast.Type, left_sym_orig &ast.TypeSymbol, right_sym_orig &ast.TypeSymbol, left_final_sym &ast.TypeSymbol, right_final_sym &ast.TypeSymbol) ast.Type {
+	// 1. 型(Type)を書き換え可能にする
+	mut left_type := left_type_orig
+
+	// 2. 参照をスマートキャスト可能にする
+	mut left_sym := unsafe { &ast.TypeSymbol(left_sym_orig) }
+	_ := left_sym // 未使用警告対策
+
+	// 3. 元の関数から消えた Pos 情報を復元する
+	left_pos := node.left.pos()
+	right_pos := node.right.pos()
+	left_right_pos := left_pos.extend(right_pos)
+
+	match right_final_sym.kind {
+		.array {
+			if left_sym.kind !in [.sum_type, .interface] {
+				elem_type := right_final_sym.array_info().elem_type
+				if node.left.is_auto_deref_var() {
+					left_type = left_type.deref()
+				}
+				c.check_expected(left_type, elem_type) or {
+					c.error('left operand to `${node.op}` does not match the array element type: ${err.msg()}',
+						left_right_pos)
+				}
+				if mut node.right is ast.ArrayInit {
+					c.check_duplicated_items(node.right)
+				}
+			} else {
+				if mut node.right is ast.ArrayInit {
+					for i, typ in node.right.expr_types {
+						c.ensure_type_exists(typ, node.right.exprs[i].pos())
+					}
+				} else {
+					elem_type := right_final_sym.array_info().elem_type
+					if node.left.is_auto_deref_var() {
+						left_type = left_type.deref()
+					}
+					c.check_expected(left_type, elem_type) or {
+						c.error('left operand to `${node.op}` does not match the array element type: ${err.msg()}',
+							left_right_pos)
+					}
+				}
+			}
+		}
+		.map {
+			map_info := right_final_sym.map_info()
+			c.check_expected(left_type, map_info.key_type) or {
+				c.error('left operand to `${node.op}` does not match the map key type: ${err.msg()}',
+					left_right_pos)
+			}
+			node.left_type = map_info.key_type
+		}
+		.array_fixed {
+			if left_sym.kind !in [.sum_type, .interface] {
+				elem_type := right_final_sym.array_fixed_info().elem_type
+				c.check_expected(left_type, elem_type) or {
+					c.error('left operand to `${node.op}` does not match the fixed array element type: ${err.msg()}',
+						left_right_pos)
+				}
+			}
+		}
+		else {
+			if mut node.right is ast.RangeExpr {
+				if !left_final_sym.is_number() && left_final_sym.kind != .rune {
+					c.error('`${left_final_sym.name}` is an invalid type for range expression',
+						node.pos)
+				}
+			} else {
+				c.error('`${node.op.str()}` can only be used with arrays and maps', node.pos)
+			}
+		}
+	}
+	if mut node.left is ast.CallExpr {
+		if node.left.return_type.has_flag(.option) || node.left.return_type.has_flag(.result) {
+			option_or_result := if node.left.return_type.has_flag(.option) {
+				'option'
+			} else {
+				'result'
+			}
+			c.error('unwrapped ${option_or_result} cannot be used with `${node.op.str()}`',
+				left_pos)
+		}
+	}
+	node.promoted_type = ast.bool_type
+	return ast.bool_type
+}
+
+fn (mut c Checker) check_infix_arithmetic(mut node ast.InfixExpr, left_type_orig ast.Type, right_type ast.Type, left_sym_orig &ast.TypeSymbol, right_sym_orig &ast.TypeSymbol, left_final_sym &ast.TypeSymbol, right_final_sym &ast.TypeSymbol) ast.Type {
+	mut left_type := left_type_orig
+
+	mut left_sym := unsafe { &ast.TypeSymbol(left_sym_orig) }
+	mut right_sym := unsafe { &ast.TypeSymbol(right_sym_orig) }
+
+	mut return_type := ast.void_type
+	left_pos := node.left.pos()
+	right_pos := node.right.pos()
+	left_right_pos := left_pos.extend(right_pos)
+
+	// binary operators that expect matching types
+	unwrapped_left_type := c.unwrap_generic(left_type)
+	left_sym = c.table.sym(unwrapped_left_type)
+	unwrapped_right_type := c.unwrap_generic(right_type)
+	right_sym = c.table.sym(unwrapped_right_type)
+	if mut right_sym.info is ast.Alias && (right_sym.info.language != .c
+		&& c.mod == c.table.type_to_str(unwrapped_right_type).split('.')[0]
+		&& (right_final_sym.is_primitive() || right_final_sym.kind == .enum)) {
+		right_sym = unsafe { right_final_sym }
+	}
+	if mut left_sym.info is ast.Alias && (left_sym.info.language != .c
+		&& c.mod == c.table.type_to_str(unwrapped_left_type).split('.')[0]
+		&& (left_final_sym.is_primitive() || left_final_sym.kind == .enum)) {
+		left_sym = unsafe { left_final_sym }
+	}
+	op_str := node.op.str()
+	if c.pref.translated && node.op in [.plus, .minus, .mul]
+		&& unwrapped_left_type.is_any_kind_of_pointer()
+		&& unwrapped_right_type.is_any_kind_of_pointer() {
+		return_type = left_type
+	} else if !c.pref.translated && left_sym.info is ast.Alias && !left_final_sym.is_primitive() {
+		if left_sym.has_method(op_str) {
+			if method := left_sym.find_method(op_str) {
+				return_type = method.return_type
+			} else {
+				return_type = left_type
+			}
+		} else if left_final_sym.has_method_with_generic_parent(op_str) {
+			if method := left_final_sym.find_method_with_generic_parent(op_str) {
+				return_type = method.return_type
+			} else {
+				return_type = left_type
+			}
+		} else {
+			left_name := c.table.type_to_str(unwrapped_left_type)
+			right_name := c.table.type_to_str(unwrapped_right_type)
+			if left_name == right_name {
+				c.error('undefined operation `${left_name}` ${op_str} `${right_name}`',
+					left_right_pos)
+			} else {
+				c.error('mismatched types `${left_name}` and `${right_name}`', left_right_pos)
+			}
+		}
+	} else if !c.pref.translated && right_sym.info is ast.Alias && !right_final_sym.is_primitive() {
+		if right_sym.has_method(op_str) {
+			if method := right_sym.find_method(op_str) {
+				return_type = method.return_type
+			} else {
+				return_type = right_type
+			}
+		} else if right_final_sym.has_method_with_generic_parent(op_str) {
+			if method := right_final_sym.find_method_with_generic_parent(op_str) {
+				return_type = method.return_type
+			} else {
+				return_type = right_type
+			}
+		} else if left_sym.has_method(op_str) {
+			if method := left_sym.find_method(op_str) {
+				return_type = method.return_type
+			} else {
+				return_type = left_type
+			}
+		} else if left_final_sym.has_method_with_generic_parent(op_str) {
+			if method := left_final_sym.find_method_with_generic_parent(op_str) {
+				return_type = method.return_type
+			} else {
+				return_type = left_type
+			}
+		} else {
+			left_name := c.table.type_to_str(unwrapped_left_type)
+			right_name := c.table.type_to_str(unwrapped_right_type)
+			if left_name == right_name {
+				c.error('undefined operation `${left_name}` ${op_str} `${right_name}`',
+					left_right_pos)
+			} else {
+				c.error('mismatched types `${left_name}` and `${right_name}`', left_right_pos)
+			}
+		}
+	}
+
+	if ((unwrapped_left_type.is_ptr() && !node.left.is_auto_deref_var())
+		|| (unwrapped_right_type.is_ptr() && !node.right.is_auto_deref_var()))
+		&& node.op !in [.plus, .minus] {
+		c.error('infix `${node.op}` is not defined for pointer values', left_right_pos)
+	}
+
+	if !c.pref.translated && left_sym.kind in [.array, .array_fixed, .map, .struct] {
+		if left_sym.has_method_with_generic_parent(op_str) {
+			if method := left_sym.find_method_with_generic_parent(op_str) {
+				return_type = method.return_type
+			} else {
+				return_type = left_type
+			}
+		} else {
+			left_name := c.table.type_to_str(unwrapped_left_type)
+			right_name := c.table.type_to_str(unwrapped_right_type)
+			if left_name == right_name {
+				c.error('undefined operation `${left_name}` ${op_str} `${right_name}`',
+					left_right_pos)
+			} else {
+				c.error('mismatched types `${left_name}` and `${right_name}`', left_right_pos)
+			}
+		}
+	} else if !c.pref.translated && right_sym.kind in [.array, .array_fixed, .map, .struct] {
+		if right_sym.has_method_with_generic_parent(op_str) {
+			if method := right_sym.find_method_with_generic_parent(op_str) {
+				return_type = method.return_type
+			} else {
+				return_type = right_type
+			}
+		} else {
+			left_name := c.table.type_to_str(unwrapped_left_type)
+			right_name := c.table.type_to_str(unwrapped_right_type)
+			if left_name == right_name {
+				c.error('undefined operation `${left_name}` ${op_str} `${right_name}`',
+					left_right_pos)
+			} else {
+				c.error('mismatched types `${left_name}` and `${right_name}`', left_right_pos)
+			}
+		}
+	} else if node.left.is_auto_deref_var() || node.right.is_auto_deref_var() {
+		deref_left_type := if node.left.is_auto_deref_var() {
+			unwrapped_left_type.deref()
+		} else {
+			unwrapped_left_type
+		}
+		deref_right_type := if node.right.is_auto_deref_var() {
+			unwrapped_right_type.deref()
+		} else {
+			unwrapped_right_type
+		}
+		left_name := c.table.type_to_str(ast.mktyp(deref_left_type))
+		right_name := c.table.type_to_str(ast.mktyp(deref_right_type))
+		if left_name != right_name {
+			c.error('mismatched types `${left_name}` and `${right_name}`', left_right_pos)
+		}
+	} else {
+		unaliased_left_type := c.table.unalias_num_type(unwrapped_left_type)
+		unalias_right_type := c.table.unalias_num_type(unwrapped_right_type)
+		mut promoted_type := c.promote_keeping_aliases(unaliased_left_type, unalias_right_type,
+			left_sym.kind, right_sym.kind)
+		// subtract pointers is allowed in unsafe block
+		is_allowed_pointer_arithmetic := left_type.is_any_kind_of_pointer()
+			&& right_type.is_any_kind_of_pointer() && node.op == .minus
+		if is_allowed_pointer_arithmetic {
+			promoted_type = ast.int_type
+		}
+		if promoted_type.idx() == ast.void_type_idx {
+			left_name := c.table.type_to_str(unwrapped_left_type)
+			right_name := c.table.type_to_str(unwrapped_right_type)
+			c.error('mismatched types `${left_name}` and `${right_name}`', left_right_pos)
+		} else if promoted_type.has_option_or_result() {
+			s := c.table.type_to_str(promoted_type)
+			c.error('`${node.op}` cannot be used with `${s}`', node.pos)
+		} else if promoted_type.is_float() {
+			if node.op in [.mod, .xor, .amp, .pipe] {
+				side := if unwrapped_left_type == promoted_type { 'left' } else { 'right' }
+				pos := if unwrapped_left_type == promoted_type {
+					left_pos
+				} else {
+					right_pos
+				}
+				name := if unwrapped_left_type == promoted_type {
+					left_sym.name
+				} else {
+					right_sym.name
+				}
+				if node.op == .mod {
+					c.error('float modulo not allowed, use math.fmod() instead', pos)
+				} else {
+					c.error('${side} type of `${op_str}` cannot be non-integer type `${name}`',
+						pos)
+				}
+			}
+		}
+		if node.op in [.div, .mod] {
+			c.check_div_mod_by_zero(node.right, node.op)
+		}
+
+		left_sym = c.table.sym(unwrapped_left_type)
+		right_sym = c.table.sym(unwrapped_right_type)
+		if left_sym.info is ast.Alias && left_final_sym.is_primitive() {
+			if left_sym.has_method(op_str) {
+				if method := left_sym.find_method(op_str) {
+					return_type = method.return_type
+				}
+			}
+		} else if right_sym.info is ast.Alias && right_final_sym.is_primitive() {
+			if right_sym.has_method(op_str) {
+				if method := right_sym.find_method(op_str) {
+					return_type = method.return_type
+				}
+			}
+		}
+		return_sym := c.table.sym(return_type)
+		if return_sym.info !is ast.Alias {
+			return_type = promoted_type
+		}
+	}
+	return return_type
+}
+
+fn (mut c Checker) check_infix_post_compatibility(mut node ast.InfixExpr, left_type_orig ast.Type, right_type_orig ast.Type, left_sym_orig &ast.TypeSymbol, right_sym_orig &ast.TypeSymbol, return_type ast.Type, left_right_pos token.Pos) ast.Type {
+	mut left_type := left_type_orig
+	mut right_type := right_type_orig
+
+	left_sym := if left_type.has_flag(.generic) {
+		left_type = c.unwrap_generic(left_type)
+		c.table.sym(left_type)
+	} else {
+		left_sym_orig
+	}
+
+	right_sym := if right_type.has_flag(.generic) {
+		right_type = c.unwrap_generic(right_type)
+		c.table.sym(right_type)
+	} else {
+		right_sym_orig
+	}
+
+	// 3. left_is_option もここで定義
+	left_is_option := left_type.has_flag(.option)
+
 	// Dual sides check (compatibility check)
 	if node.left !is ast.ComptimeCall && node.right !is ast.ComptimeCall {
-		if left_type.has_flag(.generic) {
-			left_type = c.unwrap_generic(left_type)
-			left_sym = c.table.sym(left_type)
-		}
-		if right_type.has_flag(.generic) {
-			right_type = c.unwrap_generic(right_type)
-			right_sym = c.table.sym(right_type)
-		}
 		types_match := c.symmetric_check(left_type, right_type)
 			&& c.symmetric_check(right_type, left_type)
 		mut types_match_after_deref := false
@@ -934,6 +900,97 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	*/
 	node.promoted_type = if node.op.is_relational() { ast.bool_type } else { return_type }
 	return node.promoted_type
+}
+
+fn (mut c Checker) check_infix_comparison(mut node ast.InfixExpr, left_type_orig ast.Type, right_type ast.Type, left_sym_orig &ast.TypeSymbol, right_sym_orig &ast.TypeSymbol, left_final_sym &ast.TypeSymbol, right_final_sym &ast.TypeSymbol) ast.Type {
+	mut left_type := left_type_orig
+
+	mut left_sym := unsafe { &ast.TypeSymbol(left_sym_orig) }
+	mut right_sym := unsafe { &ast.TypeSymbol(right_sym_orig) }
+
+	left_pos := node.left.pos()
+	right_pos := node.right.pos()
+	left_right_pos := left_pos.extend(right_pos)
+
+	unwrapped_left_type := c.unwrap_generic(left_type)
+	left_sym = c.table.sym(unwrapped_left_type)
+	if left_sym.kind == .alias && !left_sym.has_method_with_generic_parent(node.op.str()) {
+		left_sym = c.table.final_sym(unwrapped_left_type)
+	}
+	unwrapped_right_type := c.unwrap_generic(right_type)
+	right_sym = c.table.sym(unwrapped_right_type)
+	if right_sym.kind == .alias && !right_sym.has_method_with_generic_parent(node.op.str()) {
+		right_sym = c.table.final_sym(unwrapped_right_type)
+	}
+	if left_sym.kind in [.array, .array_fixed] && right_sym.kind in [.array, .array_fixed] {
+		c.error('only `==` and `!=` are defined on arrays', node.pos)
+	} else if left_sym.info is ast.Struct && left_sym.info.generic_types.len > 0 {
+		node.promoted_type = ast.bool_type
+		return ast.bool_type
+	} else if left_sym.kind == .struct && right_sym.kind == .struct && node.op in [.eq, .lt] {
+		if !(left_sym.has_method(node.op.str()) && right_sym.has_method(node.op.str())) {
+			left_name := c.table.type_to_str(unwrapped_left_type)
+			right_name := c.table.type_to_str(unwrapped_right_type)
+			if left_name == right_name {
+				if !(node.op == .lt && c.pref.translated) {
+					// Allow `&Foo < &Foo` in translated code.
+					// TODO: maybe in unsafe as well?
+					c.error('undefined operation `${left_name}` ${node.op.str()} `${right_name}`',
+						left_right_pos)
+				}
+			} else {
+				c.error('mismatched types `${left_name}` and `${right_name}`', left_right_pos)
+			}
+		}
+	}
+	if left_sym.kind == .struct && right_sym.kind == .struct {
+		if !left_sym.has_method('<') && node.op in [.ge, .le] {
+			c.error('cannot use `${node.op}` as `<` operator method is not defined', left_right_pos)
+		} else if !left_sym.has_method('<') && node.op == .gt {
+			c.error('cannot use `>` as `<=` operator method is not defined', left_right_pos)
+		}
+	} else if left_type.has_flag(.generic) && right_type.has_flag(.generic) {
+		// Try to unwrap the generic type to make sure that
+		// the below check works as expected
+		left_gen_type := c.unwrap_generic(left_type)
+		gen_sym := c.table.sym(left_gen_type)
+		need_overload := gen_sym.kind in [.struct, .interface]
+		if need_overload && !gen_sym.has_method_with_generic_parent('<') && node.op in [.ge, .le] {
+			c.error('cannot use `${node.op}` as `<` operator method is not defined', left_right_pos)
+		} else if need_overload && !gen_sym.has_method_with_generic_parent('<') && node.op == .gt {
+			c.error('cannot use `>` as `<=` operator method is not defined', left_right_pos)
+		}
+	} else if left_type in ast.integer_type_idxs && right_type in ast.integer_type_idxs {
+		is_left_type_signed := left_type in ast.signed_integer_type_idxs
+			|| left_type == ast.int_literal_type_idx
+		is_right_type_signed := right_type in ast.signed_integer_type_idxs
+			|| right_type == ast.int_literal_type_idx
+		if is_left_type_signed != is_right_type_signed {
+			if is_right_type_signed {
+				if mut node.right is ast.IntegerLiteral {
+					if node.right.val.int() < 0 {
+						c.error('unsigned integer cannot be compared with negative value',
+							node.right.pos)
+					}
+				}
+			} else if is_left_type_signed {
+				if mut node.left is ast.IntegerLiteral {
+					if node.left.val.int() < 0 {
+						c.error('unsigned integer cannot be compared with negative value',
+							node.left.pos)
+					}
+				}
+			}
+		}
+	} else if node.left !in [ast.Ident, ast.SelectorExpr, ast.ComptimeSelector]
+		&& (left_type.has_flag(.option) || right_type.has_flag(.option)) {
+		opt_comp_pos := if left_type.has_flag(.option) { left_pos } else { right_pos }
+		c.error('unwrapped Option cannot be compared in an infix expression', opt_comp_pos)
+	}
+	if node.left.is_nil() || node.right.is_nil() {
+		c.error('cannot use `${node.op.str()}` with `nil`', node.pos)
+	}
+	return ast.bool_type
 }
 
 fn (mut c Checker) check_div_mod_by_zero(expr ast.Expr, op_kind token.Kind) {
