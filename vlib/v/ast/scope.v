@@ -54,8 +54,8 @@ pub fn (s &Scope) find(name string) ?ScopeObject {
 		return none
 	}
 	for sc := unsafe { s }; true; sc = sc.parent {
-		if name in sc.objects {
-			return unsafe { sc.objects[name] }
+		if obj := sc.objects[name] {
+			return obj
 		}
 		if sc.dont_lookup_parent() {
 			break
@@ -139,11 +139,10 @@ pub fn (s &Scope) known_var(name string) bool {
 		return false
 	}
 	for sc := unsafe { s }; true; sc = sc.parent {
-		if name in sc.objects {
-			obj := unsafe { sc.objects[name] or { empty_scope_object } }
-			if obj is Var {
-				return true
-			}
+		if obj := sc.objects[name] {
+   			if obj is Var {
+    		    return true
+    		}
 		}
 		if sc.dont_lookup_parent() {
 			break

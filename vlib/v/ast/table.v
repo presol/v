@@ -105,6 +105,13 @@ pub mut:
 	new_int_fmt_fix     bool              // vfmt will fix `int` to `i32`
 	export_names        map[string]string // @[export] names
 	filelist            []string          // all files list
+	last_method_type_idx int
+    last_method_name     string
+    last_method_fn       Fn
+	last_field_type_idx  int
+    last_field_name      string
+    last_field_res       StructField
+    last_field_found     bool
 }
 
 pub struct ComptTimeCondResult {
@@ -340,8 +347,28 @@ pub fn (t &Table) has_method(s &TypeSymbol, name string) bool {
 	return true
 }
 
-// find_method searches from current type up through each parent looking for method
 pub fn (t &Table) find_method(s &TypeSymbol, name string) !Fn {
+	// 1. キャッシュチェックのために、一時的に mut 参照を作る
+	mut mut_t := unsafe { &Table(t) }
+
+	// 2. キャッシュヒット判定
+	if s.idx == mut_t.last_method_type_idx && name == mut_t.last_method_name {
+		return mut_t.last_method_fn
+	}
+
+	// 3. ミスした場合は元のロジックを呼ぶ (find_method_orig にリネームしたもの)
+	res := t.find_method_orig(s, name) or { return err }
+
+	// 4. 次回のためにキャッシュを更新
+	mut_t.last_method_type_idx = s.idx
+	mut_t.last_method_name = name
+	mut_t.last_method_fn = res
+
+	return res
+}
+
+// find_method searches from current type up through each parent looking for method
+pub fn (t &Table) find_method_orig(s &TypeSymbol, name string) !Fn {
 	mut ts := unsafe { s }
 	for {
 		if method := ts.find_method(name) {
@@ -584,8 +611,28 @@ pub fn (t &Table) struct_fields(sym &TypeSymbol) []StructField {
 	return fields
 }
 
+pub fn (t &Table) find_field(s &TypeSymbol, name string) ?StructField {
+	mut mut_t := unsafe { &Table(t) }
+
+	// 1. キャッシュヒット
+	if mut_t.last_field_found && s.idx == mut_t.last_field_type_idx && name == mut_t.last_field_name {
+		return mut_t.last_field_res
+	}
+
+	// 2. ミス：元の処理（リネームしたもの）を呼ぶ
+	res := t.find_field_orig(s, name) or { return none }
+
+	// 3. キャッシュ更新
+	mut_t.last_field_type_idx = s.idx
+	mut_t.last_field_name = name
+	mut_t.last_field_res = res
+	mut_t.last_field_found = true
+
+	return res
+}
+
 // search from current type up through each parent looking for field
-pub fn (t &Table) find_field(s &TypeSymbol, name string) !StructField {
+pub fn (t &Table) find_field_orig(s &TypeSymbol, name string) !StructField {
 	mut ts := unsafe { s }
 	for {
 		match mut ts.info {
@@ -767,6 +814,7 @@ pub fn (t &Table) sym_by_idx(idx int) &TypeSymbol {
 	return t.type_symbols[idx]
 }
 
+@[inline]
 @[direct_array_access]
 pub fn (t &Table) sym(typ Type) &TypeSymbol {
 	idx := typ.idx()
